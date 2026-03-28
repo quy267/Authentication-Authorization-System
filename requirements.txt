@@ -1,0 +1,23 @@
+# Runtime
+fastapi[standard]==0.115.12
+uvicorn[standard]==0.34.2
+motor==3.7.0
+beanie==1.29.0
+redis[hiredis]==5.2.1
+pyjwt[crypto]==2.10.1
+passlib[bcrypt]==1.7.4
+pydantic[email]==2.11.1
+pydantic-settings==2.8.1
+authlib==1.4.1
+httpx==0.28.1
+aiosmtplib==3.0.2
+slowapi==0.1.9
+python-multipart==0.0.20
+
+# Testing
+pytest==8.3.5
+pytest-asyncio==0.25.3
+httpx==0.28.1
+testcontainers[mongodb,redis]==4.10.0
+pytest-cov==6.1.1
+aiosmtpd==1.4.6
