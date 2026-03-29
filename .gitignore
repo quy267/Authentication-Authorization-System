@@ -90,4 +90,7 @@ worktrees/
 /main.py
 /test_main.http
 /release-manifest.json
-/docs/
+/plans/
+AGENTS.md
+CLAUDE.md
+spec.md
