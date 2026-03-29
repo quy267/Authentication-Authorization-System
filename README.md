@@ -23,15 +23,33 @@ A production-ready authentication and authorization system built with FastAPI, M
 
 ### Docker (Recommended)
 
+> **Note:** Docker BuildKit has no DNS access on some machines. Use the steps below which
+> build the image with host networking and run services with `network_mode: host`.
+
 ```bash
-# Copy environment template
-cp .env.example .env
+# 1. Create .env from the template below (see Environment Variables section)
+cp .env.example .env   # or create .env manually
 
-# Start all services
-docker-compose up -d
+# 2. Build the app image (required once; repeat after code changes)
+DOCKER_BUILDKIT=0 docker build --network=host -t auth-app .
 
-# Verify health
+# 3. Start all services (MongoDB, Redis, app)
+docker compose up -d
+
+# 4. Verify
 curl http://localhost:8000/health
+# → {"status":"ok"}
+```
+
+**Logs / status:**
+```bash
+docker compose ps
+docker compose logs app -f
+```
+
+**Stop everything:**
+```bash
+docker compose down
 ```
 
 ### Manual Setup
@@ -103,8 +121,8 @@ MONGODB_DB_NAME=auth_db
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
-# JWT (CHANGE IN PRODUCTION!)
-JWT_SECRET_KEY=change-me-in-production
+# JWT — must be ≥32 chars. Generate: openssl rand -hex 32
+JWT_SECRET_KEY=change-me-in-production-set-a-secure-key
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
