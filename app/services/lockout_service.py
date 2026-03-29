@@ -18,13 +18,13 @@ async def check_lockout(user_id: str) -> None:
 
 
 async def record_failed_attempt(user_id: str) -> None:
-    """Increment failed attempt counter with TTL."""
+    """Increment failed attempt counter. TTL set only on first failure (fixed window)."""
     redis = get_redis()
     key = f"{LOCKOUT_PREFIX}{user_id}"
-    pipe = redis.pipeline()
-    pipe.incr(key)
-    pipe.expire(key, settings.LOCKOUT_DURATION_MINUTES * 60)
-    await pipe.execute()
+    new_count = await redis.incr(key)
+    if new_count == 1:
+        # First failure — start the lockout window clock
+        await redis.expire(key, settings.LOCKOUT_DURATION_MINUTES * 60)
 
 
 async def reset_attempts(user_id: str) -> None:

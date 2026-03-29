@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from beanie import Document, Indexed
 from pydantic import EmailStr, Field
+from pymongo import ASCENDING, IndexModel
 
 
 def _utcnow() -> datetime:
@@ -35,3 +36,8 @@ class User(Document):
 
     class Settings:
         name = "users"
+        indexes = [
+            # Sparse indexes: only index non-null token values (most users have None)
+            IndexModel([("verification_token", ASCENDING)], sparse=True),
+            IndexModel([("reset_token", ASCENDING)], sparse=True),
+        ]

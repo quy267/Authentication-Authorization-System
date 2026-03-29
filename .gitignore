@@ -84,3 +84,10 @@ external/
 
 # Git worktrees (local development only)
 worktrees/
+.claude
+.opencode
+/.coverage
+/main.py
+/test_main.http
+/release-manifest.json
+/docs/

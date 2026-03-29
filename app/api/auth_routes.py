@@ -1,10 +1,8 @@
 from fastapi import APIRouter, Depends, Request, status
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from fastapi.security import HTTPAuthorizationCredentials
 
-from app.core.config import settings
-
-from app.api.deps import get_current_user
+from app.core.limiter import limiter
+from app.api.deps import get_current_user, security_scheme
 from app.models.user import User
 from app.schemas.auth import (
     ForgotPasswordRequest,
@@ -19,9 +17,6 @@ from app.schemas.auth import (
 )
 from app.services import auth_service
 
-limiter = Limiter(
-    key_func=get_remote_address, enabled=not settings.DEBUG
-)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -42,17 +37,16 @@ async def login(request: Request, body: LoginRequest):
 @router.post("/logout", response_model=MessageResponse)
 async def logout(
     body: LogoutRequest,
-    request: Request,
     current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
 ):
-    auth_header = request.headers.get("authorization", "")
-    access_token = auth_header.replace("Bearer ", "")
-    await auth_service.logout(access_token, body.refresh_token)
+    await auth_service.logout(credentials.credentials, body.refresh_token)
     return {"message": "logged out"}
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(body: RefreshRequest):
+@limiter.limit("20/minute")
+async def refresh_token(request: Request, body: RefreshRequest):
     return await auth_service.refresh(body.refresh_token)
 
 

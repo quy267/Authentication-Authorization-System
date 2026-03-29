@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     from app.core.config import settings
     if (
         not settings.DEBUG
-        and settings.JWT_SECRET_KEY == "change-me-in-production"
+        and settings.JWT_SECRET_KEY == "change-me-in-production-set-a-secure-key"
     ):
         raise RuntimeError(
             "JWT_SECRET_KEY must be changed from the default value in production"
@@ -58,8 +58,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Rate limiting
-    from app.api.auth_routes import limiter
+    # Rate limiting — single shared limiter registered so SlowAPIASGIMiddleware
+    # processes all decorated routes from one backend.
+    from app.core.limiter import limiter
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     application.add_middleware(SlowAPIASGIMiddleware)

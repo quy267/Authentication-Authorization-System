@@ -9,9 +9,20 @@ class OAuth2ClientCreateRequest(BaseModel):
     token_endpoint_auth_method: str = "client_secret_post"
 
 
-class OAuth2ClientResponse(BaseModel):
+class OAuth2ClientCreateResponse(BaseModel):
+    """POST /oauth/clients response — exposes raw secret exactly once."""
     client_id: str
     client_secret: str | None = None
+    client_name: str
+    redirect_uris: list[str]
+    allowed_scopes: list[str]
+    grant_types: list[str]
+    token_endpoint_auth_method: str
+
+
+class OAuth2ClientListResponse(BaseModel):
+    """GET /oauth/clients response — never exposes client_secret."""
+    client_id: str
     client_name: str
     redirect_uris: list[str]
     allowed_scopes: list[str]

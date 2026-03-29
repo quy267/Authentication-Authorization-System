@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from app.core.limiter import limiter
 from app.api.deps import get_current_user, require_role
 from app.models.oauth2_client import OAuth2Client
 from app.models.user import User
 from app.schemas.auth import MessageResponse
 from app.schemas.oauth2 import (
     OAuth2ClientCreateRequest,
-    OAuth2ClientResponse,
+    OAuth2ClientCreateResponse,
+    OAuth2ClientListResponse,
     OAuth2RevokeRequest,
     OAuth2TokenRequest,
     OAuth2TokenResponse,
@@ -18,7 +20,7 @@ router = APIRouter(prefix="/oauth", tags=["oauth2"])
 
 @router.post(
     "/clients",
-    response_model=OAuth2ClientResponse,
+    response_model=OAuth2ClientCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_client(
@@ -32,8 +34,8 @@ async def create_client(
         grant_types=body.grant_types,
         token_endpoint_auth_method=body.token_endpoint_auth_method,
     )
-    # Return raw secret only on creation (not stored)
-    return OAuth2ClientResponse(
+    # Return raw secret only on creation (hashed secret never stored here)
+    return OAuth2ClientCreateResponse(
         client_id=client.client_id,
         client_secret=raw_secret,
         client_name=client.client_name,
@@ -44,15 +46,14 @@ async def create_client(
     )
 
 
-@router.get("/clients", response_model=list[OAuth2ClientResponse])
+@router.get("/clients", response_model=list[OAuth2ClientListResponse])
 async def list_clients(
     current_user: User = Depends(require_role("admin")),
 ):
     clients = await OAuth2Client.find_all().to_list()
     return [
-        OAuth2ClientResponse(
+        OAuth2ClientListResponse(
             client_id=c.client_id,
-            client_secret=None,  # Never expose hashed secrets
             client_name=c.client_name,
             redirect_uris=c.redirect_uris,
             allowed_scopes=c.allowed_scopes,
@@ -89,7 +90,8 @@ async def authorize(
 
 
 @router.post("/token", response_model=OAuth2TokenResponse)
-async def token(body: OAuth2TokenRequest):
+@limiter.limit("20/minute")
+async def token(request: Request, body: OAuth2TokenRequest):
     if body.grant_type == "authorization_code":
         if not body.code or not body.redirect_uri:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing code or redirect_uri")
@@ -114,6 +116,7 @@ async def token(body: OAuth2TokenRequest):
         return await oauth2_service.refresh_oauth2_token(
             refresh_token=body.refresh_token,
             client_id=body.client_id,
+            client_secret=body.client_secret,
         )
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported grant_type")

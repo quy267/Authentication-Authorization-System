@@ -113,13 +113,14 @@ async def test_full_oauth2_journey(async_client, admin_token):
     assert resp.status_code == 200
     oauth_tokens = resp.json()
 
-    # 4. Refresh
+    # 4. Refresh (confidential client requires client_secret)
     resp = await async_client.post(
         "/oauth/token",
         json={
             "grant_type": "refresh_token",
             "refresh_token": oauth_tokens["refresh_token"],
             "client_id": client["client_id"],
+            "client_secret": client["client_secret"],
         },
     )
     assert resp.status_code == 200

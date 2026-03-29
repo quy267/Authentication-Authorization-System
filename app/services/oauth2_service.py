@@ -1,12 +1,17 @@
+import base64
 import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 
 from app.core.security import hash_password, verify_password
 from app.models.oauth2_client import OAuth2Client
 from app.models.oauth2_token import OAuth2AuthorizationCode, OAuth2Token
+
+# RFC 6749 timing constants — change here to update both storage and response
+_AUTH_CODE_TTL = timedelta(minutes=5)
+_OAUTH2_ACCESS_TOKEN_TTL = timedelta(hours=1)
 
 
 async def create_client(
@@ -63,6 +68,13 @@ async def authorize(
             "PKCE required for public clients",
         )
 
+    # Only S256 PKCE method is supported (plain method exposes verifier in URL)
+    if code_challenge_method and code_challenge_method != "S256":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Only S256 PKCE method is supported",
+        )
+
     # Validate requested scopes
     requested = set(scope.split()) if scope else set()
     if not requested.issubset(set(client.allowed_scopes)):
@@ -77,7 +89,7 @@ async def authorize(
         scope=scope,
         code_challenge=code_challenge,
         code_challenge_method=code_challenge_method,
-        expires_at=datetime.utcnow() + timedelta(minutes=5),
+        expires_at=datetime.now(timezone.utc) + _AUTH_CODE_TTL,
     )
     await auth_code.insert()
     return code
@@ -114,8 +126,10 @@ async def exchange_code(
     if not client:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client")
 
-    # Verify client credentials for confidential clients
+    # Verify client credentials for confidential clients (guard None before bcrypt)
     if client.token_endpoint_auth_method != "none":
+        if not client_secret:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Client secret required")
         if not verify_password(client_secret, client.client_secret):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client secret")
 
@@ -128,9 +142,14 @@ async def exchange_code(
         ):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code verifier")
 
-    # Mark code as used
-    auth_code.used = True
-    await auth_code.save()
+    # Atomic mark-as-used: prevents double-spend race via motor findOneAndUpdate
+    collection = OAuth2AuthorizationCode.get_motor_collection()
+    matched = await collection.find_one_and_update(
+        {"_id": auth_code.id, "used": False},
+        {"$set": {"used": True}},
+    )
+    if matched is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code already used")
 
     return await _issue_oauth2_tokens(client_id, auth_code.user_id, auth_code.scope)
 
@@ -162,6 +181,7 @@ async def client_credentials_grant(
 async def refresh_oauth2_token(
     refresh_token: str,
     client_id: str,
+    client_secret: str | None = None,
 ) -> dict:
     """Refresh an OAuth2 token."""
     token_record = await OAuth2Token.find_one(
@@ -172,6 +192,17 @@ async def refresh_oauth2_token(
 
     if token_record.client_id != client_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Client mismatch")
+
+    # Verify client secret for confidential clients (guard None before bcrypt)
+    client = await OAuth2Client.find_one(OAuth2Client.client_id == client_id)
+    if not client:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client")
+
+    if client.token_endpoint_auth_method != "none":
+        if not client_secret:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Client secret required")
+        if not verify_password(client_secret, client.client_secret):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client secret")
 
     # Revoke old token
     token_record.revoked = True
@@ -214,14 +245,14 @@ async def _issue_oauth2_tokens(
         client_id=client_id,
         user_id=user_id,
         scope=scope,
-        expires_at=datetime.utcnow() + timedelta(hours=1),
+        expires_at=datetime.now(timezone.utc) + _OAUTH2_ACCESS_TOKEN_TTL,
     )
     await token.insert()
 
     result = {
         "access_token": access_token,
         "token_type": "Bearer",
-        "expires_in": 3600,
+        "expires_in": int(_OAUTH2_ACCESS_TOKEN_TTL.total_seconds()),
         "scope": scope,
     }
     if refresh_token:
@@ -234,11 +265,9 @@ def _verify_pkce(
     code_challenge: str,
     method: str | None,
 ) -> bool:
-    """Verify PKCE code_verifier against stored code_challenge."""
-    if method == "S256":
-        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-        import base64
-        computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-        return computed == code_challenge
-    # plain method
-    return code_verifier == code_challenge
+    """Verify PKCE code_verifier — S256 only (plain method is rejected)."""
+    if method != "S256":
+        return False
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return computed == code_challenge

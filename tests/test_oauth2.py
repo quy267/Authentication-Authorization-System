@@ -269,13 +269,14 @@ async def test_oauth2_token_refresh(async_client, admin_token):
     )
     old_refresh = resp.json()["refresh_token"]
 
-    # Refresh
+    # Refresh (confidential client requires client_secret)
     resp = await async_client.post(
         "/oauth/token",
         json={
             "grant_type": "refresh_token",
             "refresh_token": old_refresh,
             "client_id": client["client_id"],
+            "client_secret": client["client_secret"],
         },
     )
     assert resp.status_code == 200

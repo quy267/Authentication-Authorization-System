@@ -1,5 +1,6 @@
 import secrets
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 
@@ -70,18 +71,19 @@ async def login(email: str, password: str) -> dict:
 async def logout(access_token: str, refresh_token: str) -> None:
     """Blacklist both tokens in Redis."""
     redis = get_redis()
+    now = int(time.time())
 
     access_payload = decode_token(access_token)
     await redis.setex(
         f"{BLACKLIST_PREFIX}{access_payload['jti']}",
-        access_payload["exp"] - int(access_payload["iat"]),
+        max(access_payload["exp"] - now, 1),
         "1",
     )
 
     refresh_payload = decode_token(refresh_token)
     await redis.setex(
         f"{BLACKLIST_PREFIX}{refresh_payload['jti']}",
-        refresh_payload["exp"] - int(refresh_payload["iat"]),
+        max(refresh_payload["exp"] - now, 1),
         "1",
     )
 
@@ -110,10 +112,10 @@ async def refresh(refresh_token_str: str) -> dict:
             detail="Token has been revoked",
         )
 
-    # Blacklist old refresh token
+    # Blacklist old refresh token (TTL = remaining lifetime, not total)
     await redis.setex(
         f"{BLACKLIST_PREFIX}{payload['jti']}",
-        payload["exp"] - int(payload["iat"]),
+        max(payload["exp"] - int(time.time()), 1),
         "1",
     )
 
@@ -122,6 +124,12 @@ async def refresh(refresh_token_str: str) -> dict:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account disabled",
         )
 
     return _issue_tokens(user)
@@ -139,7 +147,7 @@ async def send_verification(user: User) -> None:
 
     token = secrets.token_urlsafe(32)
     user.verification_token = token
-    user.verification_token_expires = datetime.utcnow() + timedelta(hours=1)
+    user.verification_token_expires = datetime.now(timezone.utc) + timedelta(hours=1)
     await user.save()
 
     from app.services.email_service import send_verification_email
@@ -174,7 +182,7 @@ async def request_password_reset(email: str) -> None:
 
     token = secrets.token_urlsafe(32)
     user.reset_token = token
-    user.reset_token_expires = datetime.utcnow() + timedelta(minutes=30)
+    user.reset_token_expires = datetime.now(timezone.utc) + timedelta(minutes=30)
     await user.save()
 
     from app.services.email_service import send_reset_email
@@ -195,7 +203,8 @@ async def reset_password(token: str, new_password: str) -> None:
     user.reset_token_expires = None
     await user.save()
 
-    # Invalidate all existing sessions by blacklisting — handled by caller if needed
+    # Invalidate all pre-reset sessions so attacker loses access after account recovery
+    await _revoke_all_sessions(str(user.id))
 
 
 async def _check_email_rate_limit(email: str) -> None:
@@ -212,6 +221,12 @@ async def _check_email_rate_limit(email: str) -> None:
     pipe.incr(key)
     pipe.expire(key, 3600)  # 1 hour TTL
     await pipe.execute()
+
+
+async def _revoke_all_sessions(user_id: str) -> None:
+    """Mark all sessions for a user as revoked (checked in get_current_user)."""
+    redis = get_redis()
+    await redis.set(f"revoked_at:{user_id}", str(int(time.time())))
 
 
 def _issue_tokens(user: User) -> dict:

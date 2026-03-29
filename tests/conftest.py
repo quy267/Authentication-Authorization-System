@@ -97,8 +97,8 @@ async def async_client(
     application = create_app()
     application.router.lifespan_context = None
 
-    # Disable rate limiting in tests
-    from app.api.auth_routes import limiter
+    # Disable rate limiting in tests (single shared instance)
+    from app.core.limiter import limiter
     limiter.enabled = False
 
     transport = ASGITransport(app=application)
