@@ -276,7 +276,7 @@ mypy app/
 
 ## License
 
-[Specify your license here - MIT, Apache 2.0, proprietary, etc.]
+Apache 2.0
 
 ## Documentation
 
