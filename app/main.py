@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIASGIMiddleware
@@ -31,19 +32,16 @@ async def seed_default_roles() -> None:
         existing = await Role.find_one(Role.name == role_data["name"])
         if not existing:
             await Role(**role_data).insert()
+        elif set(existing.permissions) != set(role_data["permissions"]):
+            # Update permissions if they changed in code (idempotent sync)
+            existing.permissions = role_data["permissions"]
+            await existing.save()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: init DB connections + seed roles. Shutdown: close them."""
-    from app.core.config import settings
-    if (
-        not settings.DEBUG
-        and settings.JWT_SECRET_KEY == "change-me-in-production-set-a-secure-key"
-    ):
-        raise RuntimeError(
-            "JWT_SECRET_KEY must be changed from the default value in production"
-        )
+    # JWT_SECRET_KEY is now required (no default) — pydantic will raise on missing
     await init_db()
     await seed_default_roles()
     yield
@@ -57,6 +55,18 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # CORS — restrict origins in production via CORS_ORIGINS env var
+    from app.core.config import settings
+    origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+    if origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Rate limiting — single shared limiter registered so SlowAPIASGIMiddleware
     # processes all decorated routes from one backend.

@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -110,9 +111,14 @@ async def exchange_code(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid code")
 
     if auth_code.used:
+        # RFC 6749 §4.1.2: revoke all tokens issued from this code on reuse
+        await OAuth2Token.find(
+            OAuth2Token.client_id == auth_code.client_id,
+            OAuth2Token.user_id == auth_code.user_id,
+        ).update({"$set": {"revoked": True}})
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code already used")
 
-    if auth_code.expires_at < datetime.utcnow():
+    if auth_code.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code expired")
 
     if auth_code.client_id != client_id:
@@ -167,6 +173,10 @@ async def client_credentials_grant(
     if "client_credentials" not in client.grant_types:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Grant type not allowed")
 
+    # Public clients must not use client_credentials grant (no secret to verify)
+    if not client.client_secret:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Public clients cannot use client_credentials grant")
+
     if not verify_password(client_secret, client.client_secret):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client secret")
 
@@ -183,7 +193,7 @@ async def refresh_oauth2_token(
     client_id: str,
     client_secret: str | None = None,
 ) -> dict:
-    """Refresh an OAuth2 token."""
+    """Refresh an OAuth2 token (atomic revocation to prevent TOCTOU race)."""
     token_record = await OAuth2Token.find_one(
         OAuth2Token.refresh_token == refresh_token
     )
@@ -201,29 +211,52 @@ async def refresh_oauth2_token(
     if client.token_endpoint_auth_method != "none":
         if not client_secret:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Client secret required")
-        if not verify_password(client_secret, client.client_secret):
+        if not client.client_secret or not verify_password(client_secret, client.client_secret):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client secret")
 
-    # Revoke old token
-    token_record.revoked = True
-    await token_record.save()
+    # Atomic revoke: prevents concurrent refresh race (TOCTOU)
+    collection = OAuth2Token.get_motor_collection()
+    matched = await collection.find_one_and_update(
+        {"_id": token_record.id, "revoked": False},
+        {"$set": {"revoked": True}},
+    )
+    if matched is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Token already revoked")
 
     return await _issue_oauth2_tokens(
         client_id, token_record.user_id, token_record.scope
     )
 
 
-async def revoke_token(token: str) -> None:
-    """Revoke an access or refresh token (RFC 7009 — always 200)."""
-    # Try access token
-    record = await OAuth2Token.find_one(OAuth2Token.access_token == token)
+async def revoke_token(token: str, client_id: str, client_secret: str | None = None) -> None:
+    """Revoke an access or refresh token (RFC 7009 — always 200).
+
+    Verifies caller is the owning client before revoking.
+    """
+    # Verify client exists and authenticate
+    client = await OAuth2Client.find_one(OAuth2Client.client_id == client_id)
+    if not client:
+        return  # RFC 7009: always 200, even on invalid client
+
+    if client.token_endpoint_auth_method != "none":
+        if not client_secret or not client.client_secret:
+            return
+        if not verify_password(client_secret, client.client_secret):
+            return
+
+    # Try access token (only revoke if it belongs to this client)
+    record = await OAuth2Token.find_one(
+        OAuth2Token.access_token == token, OAuth2Token.client_id == client_id
+    )
     if record:
         record.revoked = True
         await record.save()
         return
 
     # Try refresh token
-    record = await OAuth2Token.find_one(OAuth2Token.refresh_token == token)
+    record = await OAuth2Token.find_one(
+        OAuth2Token.refresh_token == token, OAuth2Token.client_id == client_id
+    )
     if record:
         record.revoked = True
         await record.save()
@@ -270,4 +303,4 @@ def _verify_pkce(
         return False
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return computed == code_challenge
+    return hmac.compare_digest(computed, code_challenge)

@@ -13,8 +13,8 @@ async def init_db(document_models: list | None = None) -> None:
     """Initialize MongoDB (Beanie) and Redis connections."""
     global _mongo_client, _redis_client
 
-    # MongoDB + Beanie
-    _mongo_client = AsyncIOMotorClient(settings.MONGODB_URL)
+    # MongoDB + Beanie — tz_aware=True so datetimes come back with UTC tzinfo
+    _mongo_client = AsyncIOMotorClient(settings.MONGODB_URL, tz_aware=True)
     db = _mongo_client[settings.MONGODB_DB_NAME]
 
     if document_models is None:

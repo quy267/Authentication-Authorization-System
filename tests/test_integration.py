@@ -125,10 +125,14 @@ async def test_full_oauth2_journey(async_client, admin_token):
     )
     assert resp.status_code == 200
 
-    # 5. Revoke
+    # 5. Revoke (now requires client authentication)
     resp = await async_client.post(
         "/oauth/revoke",
-        json={"token": resp.json()["access_token"]},
+        json={
+            "token": resp.json()["access_token"],
+            "client_id": client["client_id"],
+            "client_secret": client["client_secret"],
+        },
     )
     assert resp.status_code == 200
 
@@ -172,3 +176,53 @@ async def test_admin_journey(async_client, admin_token):
     assert resp.status_code == 200
     emails = [u["email"] for u in resp.json()]
     assert "reviewer@test.com" in emails
+
+
+# ---------------------------------------------------------------------------
+# main.py coverage: seed_default_roles idempotent update (lines 35-38),
+# CORS middleware with CORS_ORIGINS env var (lines 62-63, 37-38 of create_app)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_seed_default_roles_updates_changed_permissions(async_client):
+    """seed_default_roles updates permissions when they differ from code defaults."""
+    from app.main import seed_default_roles
+    from app.models.role import Role
+
+    # Seed initially
+    await seed_default_roles()
+
+    # Tamper with permissions to simulate a code change
+    admin_role = await Role.find_one(Role.name == "admin")
+    admin_role.permissions = ["users:read"]  # deliberately stale
+    await admin_role.save()
+
+    # Re-seed should detect mismatch and update
+    await seed_default_roles()
+
+    refreshed = await Role.find_one(Role.name == "admin")
+    assert "roles:manage" in refreshed.permissions
+    assert "users:write" in refreshed.permissions
+
+
+@pytest.mark.asyncio
+async def test_cors_middleware_applied_when_origins_set(test_containers):
+    """CORS middleware is added when CORS_ORIGINS is non-empty."""
+    from app.core.config import settings
+
+    original_cors = settings.CORS_ORIGINS
+    settings.CORS_ORIGINS = "http://localhost:3000,https://myapp.com"
+
+    try:
+        from app.main import create_app
+        application = create_app()
+        # Check middleware stack includes CORSMiddleware via cls attribute
+        middleware_cls_names = [
+            getattr(m, "cls", type(m)).__name__
+            for m in application.user_middleware
+        ]
+        assert "CORSMiddleware" in middleware_cls_names, \
+            f"CORSMiddleware not found in {middleware_cls_names}"
+    finally:
+        settings.CORS_ORIGINS = original_cors

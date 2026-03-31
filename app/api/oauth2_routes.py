@@ -124,5 +124,5 @@ async def token(request: Request, body: OAuth2TokenRequest):
 
 @router.post("/revoke", response_model=MessageResponse)
 async def revoke(body: OAuth2RevokeRequest):
-    await oauth2_service.revoke_token(body.token)
+    await oauth2_service.revoke_token(body.token, body.client_id, body.client_secret)
     return {"message": "token revoked"}

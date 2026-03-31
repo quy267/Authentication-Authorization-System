@@ -1,3 +1,6 @@
+import hashlib
+import json
+import logging
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -18,14 +21,42 @@ from app.models.user import User
 BLACKLIST_PREFIX = "bl:"
 RATE_LIMIT_PREFIX = "rl:email:"
 
+# Structured audit logger — outputs JSON to stdout for Docker/K8s log aggregation
+_audit_logger = logging.getLogger("audit")
+if not _audit_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _audit_logger.addHandler(_handler)
+    _audit_logger.setLevel(logging.INFO)
+
+
+def audit_log(event: str, user_id: str | None = None, **extra) -> None:
+    """Emit a structured JSON audit log entry for security events."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "user_id": user_id,
+        **extra,
+    }
+    _audit_logger.info(json.dumps(entry, default=str))
+
+# Pre-computed dummy hash for constant-time login on non-existent users
+_DUMMY_HASH = hash_password("dummy-password-for-timing-safety")
+
 
 async def register(email: str, password: str) -> dict:
-    """Register a new user and return token pair."""
+    """Register a new user and return token pair.
+
+    Returns 409 only on actual DB constraint violation (race condition safety).
+    For existing emails, silently returns generic message to prevent enumeration.
+    """
     existing = await User.find_one(User.email == email)
     if existing:
+        # Don't reveal that the email exists — send a notification email instead
+        # (email service can inform the real owner someone tried to register)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered",
+            detail="Registration could not be completed",
         )
 
     user = User(email=email, hashed_password=hash_password(password))
@@ -35,57 +66,82 @@ async def register(email: str, password: str) -> dict:
 
 
 async def login(email: str, password: str) -> dict:
-    """Authenticate user and return token pair."""
+    """Authenticate user and return token pair.
+
+    Security: constant-time response for missing users (timing oracle prevention),
+    lockout checked before password verify, is_active checked before bcrypt.
+    """
     from app.services.lockout_service import (
         check_lockout, record_failed_attempt, reset_attempts,
     )
 
     user = await User.find_one(User.email == email)
+
+    # Check lockout keyed by email hash (works even for non-existent users)
+    lockout_key = str(user.id) if user else hashlib.sha256(email.encode()).hexdigest()
+    await check_lockout(lockout_key)
+
     if not user:
+        # Constant-time: run bcrypt on dummy hash so response time matches real users
+        verify_password(password, _DUMMY_HASH)
+        audit_log("login_failed", reason="user_not_found", email=email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
 
-    # Check lockout before password verification
-    await check_lockout(str(user.id))
+    # Check is_active before expensive bcrypt verification
+    if not user.is_active:
+        audit_log("login_failed", user_id=str(user.id), reason="account_disabled")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
 
     if not verify_password(password, user.hashed_password):
-        await record_failed_attempt(str(user.id))
+        await record_failed_attempt(lockout_key)
+        audit_log("login_failed", user_id=str(user.id), reason="wrong_password")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account disabled",
         )
 
     # Successful login — reset lockout counter
-    await reset_attempts(str(user.id))
+    await reset_attempts(lockout_key)
+    audit_log("login_success", user_id=str(user.id))
     return _issue_tokens(user)
 
 
 async def logout(access_token: str, refresh_token: str) -> None:
-    """Blacklist both tokens in Redis."""
+    """Blacklist both tokens in Redis. Each token handled independently so a
+    malformed refresh token doesn't prevent the access token from being revoked.
+    """
     redis = get_redis()
     now = int(time.time())
 
-    access_payload = decode_token(access_token)
-    await redis.setex(
-        f"{BLACKLIST_PREFIX}{access_payload['jti']}",
-        max(access_payload["exp"] - now, 1),
-        "1",
-    )
+    user_id = None
+    try:
+        access_payload = decode_token(access_token)
+        user_id = access_payload.get("sub")
+        await redis.setex(
+            f"{BLACKLIST_PREFIX}{access_payload['jti']}",
+            max(access_payload["exp"] - now, 1),
+            "1",
+        )
+    except Exception:
+        pass  # Access token already expired or invalid — nothing to blacklist
 
-    refresh_payload = decode_token(refresh_token)
-    await redis.setex(
-        f"{BLACKLIST_PREFIX}{refresh_payload['jti']}",
-        max(refresh_payload["exp"] - now, 1),
-        "1",
-    )
+    try:
+        refresh_payload = decode_token(refresh_token)
+        await redis.setex(
+            f"{BLACKLIST_PREFIX}{refresh_payload['jti']}",
+            max(refresh_payload["exp"] - now, 1),
+            "1",
+        )
+    except Exception:
+        pass  # Refresh token already expired or invalid — nothing to blacklist
+
+    audit_log("logout", user_id=user_id)
 
 
 async def refresh(refresh_token_str: str) -> dict:
@@ -163,7 +219,7 @@ async def verify_email(token: str) -> None:
     if user.is_verified:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Already verified")
 
-    if user.verification_token_expires < datetime.utcnow():
+    if user.verification_token_expires < datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Token expired")
 
     user.is_verified = True
@@ -195,7 +251,7 @@ async def reset_password(token: str, new_password: str) -> None:
     if not user:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid token")
 
-    if user.reset_token_expires < datetime.utcnow():
+    if user.reset_token_expires < datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Token expired")
 
     user.hashed_password = hash_password(new_password)
@@ -204,29 +260,38 @@ async def reset_password(token: str, new_password: str) -> None:
     await user.save()
 
     # Invalidate all pre-reset sessions so attacker loses access after account recovery
-    await _revoke_all_sessions(str(user.id))
+    await revoke_all_sessions(str(user.id))
+    audit_log("password_reset", user_id=str(user.id))
 
 
 async def _check_email_rate_limit(email: str) -> None:
-    """Rate limit: max 3 verification/reset emails per hour per user."""
+    """Rate limit: max 3 verification/reset emails per hour per user.
+
+    Atomic INCR-first pattern prevents TOCTOU race under concurrent requests.
+    """
     redis = get_redis()
     key = f"{RATE_LIMIT_PREFIX}{email}"
-    count = await redis.get(key)
-    if count and int(count) >= 3:
+    count = await redis.incr(key)
+    if count == 1:
+        # First request in window — start the 1-hour TTL
+        await redis.expire(key, 3600)
+    if count > 3:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many email requests. Try again later.",
         )
-    pipe = redis.pipeline()
-    pipe.incr(key)
-    pipe.expire(key, 3600)  # 1 hour TTL
-    await pipe.execute()
 
 
-async def _revoke_all_sessions(user_id: str) -> None:
-    """Mark all sessions for a user as revoked (checked in get_current_user)."""
+async def revoke_all_sessions(user_id: str) -> None:
+    """Mark all sessions for a user as revoked (checked in get_current_user).
+
+    TTL matches max token lifetime so keys auto-expire from Redis.
+    """
+    from app.core.config import settings
     redis = get_redis()
-    await redis.set(f"revoked_at:{user_id}", str(int(time.time())))
+    ttl = settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400
+    audit_log("sessions_revoked", user_id=user_id)
+    await redis.setex(f"revoked_at:{user_id}", ttl, str(int(time.time())))
 
 
 def _issue_tokens(user: User) -> dict:

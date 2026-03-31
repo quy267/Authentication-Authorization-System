@@ -53,7 +53,7 @@ async def get_current_user(
     # Check if all sessions were revoked (e.g., after password reset)
     redis = get_redis()
     revoked_at = await redis.get(f"revoked_at:{user.id}")
-    if revoked_at and int(revoked_at) > payload.get("iat", 0):
+    if revoked_at and int(revoked_at) > int(payload.get("iat", 0)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session has been revoked",

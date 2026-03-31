@@ -51,7 +51,8 @@ async def refresh_token(request: Request, body: RefreshRequest):
 
 
 @router.post("/verify-email", response_model=MessageResponse)
-async def verify_email(body: VerifyEmailRequest):
+@limiter.limit("10/minute")
+async def verify_email(request: Request, body: VerifyEmailRequest):
     await auth_service.verify_email(body.token)
     return {"message": "email verified"}
 
@@ -64,6 +65,7 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
 
 
 @router.post("/reset-password", response_model=MessageResponse)
-async def reset_password(body: ResetPasswordRequest):
+@limiter.limit("10/minute")
+async def reset_password(request: Request, body: ResetPasswordRequest):
     await auth_service.reset_password(body.token, body.new_password)
     return {"message": "password reset"}

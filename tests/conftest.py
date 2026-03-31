@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import time
 from collections.abc import AsyncGenerator
@@ -7,6 +8,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+
+# JWT_SECRET_KEY is now required (no default) — set before Settings() loads
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-must-be-at-least-32-chars-long")
 
 from app.core.config import settings
 
@@ -78,7 +82,7 @@ async def async_client(
     settings.MONGODB_URL = f"mongodb://localhost:{TEST_MONGO_PORT}"
     settings.MONGODB_DB_NAME = "test_auth_db"
     settings.REDIS_URL = f"redis://localhost:{TEST_REDIS_PORT}/0"
-    settings.JWT_SECRET_KEY = "test-secret-key"
+    settings.JWT_SECRET_KEY = "test-secret-key-must-be-at-least-32-chars-long"
     settings.DEBUG = True  # Disables slowapi rate limiting in tests
 
     # Fresh init per test (binds Motor/Redis to current event loop)

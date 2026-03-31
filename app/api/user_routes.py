@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import require_role
 from app.models.user import User
@@ -12,8 +12,8 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.get("", response_model=list[UserResponse])
 async def list_users(
     current_user: User = Depends(require_role("admin")),
-    skip: int = 0,
-    limit: int = 20,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
 ):
     users = await user_service.list_users(skip, limit)
     return [

@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # JWT — default is intentionally insecure; override in production via env var
-    JWT_SECRET_KEY: str = "change-me-in-production-set-a-secure-key"
+    # JWT — no default; must be set via env var or .env file
+    JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # Account lockout
     LOCKOUT_THRESHOLD: int = 5
     LOCKOUT_DURATION_MINUTES: int = 15
+
+    # CORS — comma-separated origins, e.g. "http://localhost:3000,https://myapp.com"
+    CORS_ORIGINS: str = ""
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod

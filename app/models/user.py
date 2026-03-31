@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from beanie import Document, Indexed
+from beanie import Document, Indexed, Replace, before_event
 from pydantic import EmailStr, Field
 from pymongo import ASCENDING, IndexModel
 
@@ -26,13 +26,13 @@ class User(Document):
     reset_token: str | None = None
     reset_token_expires: datetime | None = None
 
-    # Account lockout
-    failed_login_attempts: int = 0
-    locked_until: datetime | None = None
-
-    # Timestamps
+    # Timestamps (lockout tracking is handled in Redis, not DB)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+    @before_event(Replace)
+    def update_timestamp(self):
+        self.updated_at = _utcnow()
 
     class Settings:
         name = "users"
