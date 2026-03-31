@@ -2,7 +2,7 @@
 
 A production-ready authentication and authorization system built with FastAPI, MongoDB, and Redis. Implements JWT-based auth, role-based access control (RBAC), OAuth2 flows, email verification, account lockout protection, and session revocation.
 
-**Status:** v0.1.0 (Core implementation complete, comprehensive test coverage)
+**Status:** v0.2.0 (28 security fixes, 96% test coverage, audit logging)
 
 ## Tech Stack
 
@@ -121,8 +121,9 @@ MONGODB_DB_NAME=auth_db
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
-# JWT — must be ≥32 chars. Generate: openssl rand -hex 32
-JWT_SECRET_KEY=change-me-in-production-set-a-secure-key
+# JWT — REQUIRED, must be ≥32 chars. App will NOT start without it.
+# Generate: openssl rand -hex 32
+JWT_SECRET_KEY=           # ← REQUIRED (no default — pydantic fails on missing)
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
@@ -137,6 +138,9 @@ EMAIL_FROM=noreply@example.com
 # Security
 LOCKOUT_THRESHOLD=5              # Failed login attempts
 LOCKOUT_DURATION_MINUTES=15      # How long to lock account
+
+# CORS (optional — empty means no CORS middleware)
+CORS_ORIGINS=                    # Comma-separated origins, e.g. https://app.example.com,https://admin.example.com
 ```
 
 ## Testing
@@ -156,7 +160,7 @@ Test suite:
 - **Unit tests:** Core functions (security, config, models)
 - **Integration tests:** Full workflows (auth flows, RBAC, OAuth2)
 - **E2E tests:** Real database + email via testcontainers
-- **Coverage:** 90%+ of app code
+- **Coverage:** 96% of app code (103 tests)
 
 ## Project Structure
 
@@ -219,30 +223,36 @@ Test suite:
 
 ## Key Features
 
-- **JWT Authentication:** Unique JTI per token, Redis blacklist with TTL, refresh token rotation, 32-char minimum key
-- **RBAC:** Roles + permissions model, admin-only endpoints, default roles protected, optimized $in queries
-- **OAuth2:** RFC 6749 auth code + client credentials, RFC 7636 PKCE (S256), RFC 7009 revocation, atomic code exchange
-- **Email Verification:** 1-hour expiring tokens, rate-limited (3/hour), enumeration prevention
-- **Password Reset:** Secure 30-minute tokens, verification workflow, bcrypt DoS guard (max_length=1024)
-- **Account Lockout:** 5 failed attempts = 15-min lockout via Redis (fixed window TTL), TTL set only on first failure
-- **Rate Limiting:** Shared limiter instance, /auth endpoints (10/min), /auth/refresh (20/min), /oauth/token (20/min), /forgot-password (5/min)
+- **JWT Authentication:** Unique JTI per token, Redis blacklist with TTL, refresh token rotation, required secret key (no default)
+- **RBAC:** Roles + permissions model, admin-only endpoints, default roles protected, optimized $in queries, idempotent seeding
+- **OAuth2:** RFC 6749 auth code + client credentials, RFC 7636 PKCE (S256 with `hmac.compare_digest`), RFC 7009 revocation (client auth required), atomic code exchange, auth code reuse revokes all tokens (RFC 6749 §4.1.2), public clients blocked from client_credentials
+- **Email Verification:** 1-hour expiring tokens, rate-limited (3/hour), enumeration prevention (generic error messages)
+- **Password Reset:** Secure 30-minute tokens, verification workflow, bcrypt 72-byte validation (UTF-8 byte length)
+- **Account Lockout:** Email-hash keyed (works for non-existent users), checked before user lookup, 5 failures = 15-min lockout via Redis (fixed window TTL)
+- **Rate Limiting:** Shared limiter instance, /auth endpoints (10/min), /auth/refresh (20/min), /oauth/token (20/min), /forgot-password (5/min), /verify-email (10/min), /reset-password (10/min)
+- **Login Security:** Timing oracle prevention (dummy bcrypt on missing users), is_active checked before password verification
 - **MongoDB Indexes:** TTL indexes on OAuth2 auth codes, sparse indexes on verification tokens
-- **Session Revocation:** Blacklist via Redis, per-user session tracking
-- **Async:** 100% async (asyncio, motor, aiosmtplib, hiredis)
-- **Security:** bcrypt hashing, HTTPS-ready, CORS-ready, SQL injection-proof (ODM), timing-safe checks
+- **Session Revocation:** Blacklist via Redis, per-user session tracking, `revoked_at:` keys with TTL
+- **Audit Logging:** Structured JSON to stdout for login, logout, password_reset, sessions_revoked, roles_changed
+- **CORS:** Configurable via `CORS_ORIGINS` env var (empty = disabled)
+- **Async:** 100% async (asyncio, motor with `tz_aware=True`, aiosmtplib, hiredis)
+- **Docker:** Non-root container (appuser), multi-stage build
+- **Security:** bcrypt hashing, timing-safe comparisons, HTTPS-ready, SQL injection-proof (ODM)
 
 ## Security Checklist
 
-- [ ] Change `JWT_SECRET_KEY` in .env (use `openssl rand -hex 32`)
+- [ ] Set `JWT_SECRET_KEY` in .env — **REQUIRED** (app won't start without it). Generate: `openssl rand -hex 32`
 - [ ] Configure SMTP credentials (email verification, password reset)
 - [ ] Use HTTPS in production (Uvicorn behind reverse proxy)
-- [ ] Restrict CORS origins if needed
+- [ ] Set `CORS_ORIGINS` to restrict allowed origins (empty = no CORS middleware)
 - [ ] Monitor Redis/MongoDB access (firewall rules)
 - [ ] Rotate JWT keys periodically
 - [ ] Enable database backups (MongoDB)
-- [ ] Set strong password policies in frontend
+- [ ] Set strong password policies in frontend (note: bcrypt truncates at 72 bytes)
 - [ ] Use environment-specific .env files
 - [ ] Review rate limiting thresholds for your load
+- [ ] Verify Docker runs as non-root (`appuser`)
+- [ ] Review audit logs (structured JSON to stdout) for security events
 
 ## Contributing
 

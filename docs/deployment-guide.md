@@ -117,16 +117,18 @@ curl http://localhost:8000/health
 
 Before going live:
 
-- [ ] JWT_SECRET_KEY: Strong random key (`openssl rand -hex 32`)
+- [ ] JWT_SECRET_KEY: **REQUIRED** — app will NOT start without it. Generate: `openssl rand -hex 32`
 - [ ] SMTP credentials: In secrets manager (NOT in git)
 - [ ] MongoDB password: Strong, non-default
 - [ ] Redis password: Strong, non-default
-- [ ] CORS origins: Restricted to known domains
+- [ ] CORS_ORIGINS: Set to allowed domains only (empty = no CORS middleware)
 - [ ] HTTPS: Enforced on all endpoints
-- [ ] Rate limiting: Configured appropriately
+- [ ] Rate limiting: Configured appropriately (verify-email 10/min, reset-password 10/min added in v0.2.0)
 - [ ] Account lockout: Threshold appropriate
 - [ ] Email verification: Required
 - [ ] Database backups: Scheduled daily
+- [ ] Docker: Verify container runs as non-root (`appuser`) — default since v0.2.0
+- [ ] Audit logs: Monitor structured JSON stdout for security events (login, logout, password_reset, sessions_revoked, roles_changed)
 
 ### Configuration for Production
 
@@ -141,9 +143,8 @@ MONGODB_URL=mongodb+srv://user:password@prod-cluster.mongodb.net/auth_db
 MONGODB_DB_NAME=auth_db
 REDIS_URL=redis://:password@prod-redis.internal:6379/0
 
-# JWT (MUST BE CHANGED! Enforced ≥32 chars at startup)
+# JWT (REQUIRED — no default! App won't start without it. Enforced ≥32 chars)
 # Generate: openssl rand -hex 32
-# Default "change-me-in-production-set-a-secure-key" is rejected in production
 JWT_SECRET_KEY=<64-char-hex-string-from-openssl-rand-hex-32>
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
@@ -160,6 +161,9 @@ EMAIL_FROM=noreply@yourdomain.com
 LOCKOUT_THRESHOLD=5
 LOCKOUT_DURATION_MINUTES=15
 LOG_LEVEL=INFO
+
+# CORS (set to allowed origins — empty means no CORS middleware)
+CORS_ORIGINS=https://app.yourdomain.com,https://admin.yourdomain.com
 ```
 
 **Store secrets in:**
@@ -171,9 +175,11 @@ LOG_LEVEL=INFO
 
 ### Docker Production
 
+> **Note:** Since v0.2.0, the Dockerfile runs as non-root user (`appuser`). No additional configuration needed.
+
 ```bash
 # Build image
-docker build -t auth-system:0.1.0 .
+docker build -t auth-system:0.2.0 .
 
 # Push to registry
 docker tag auth-system:0.1.0 registry.prod.internal/auth-system:0.1.0
@@ -463,3 +469,4 @@ docker logs auth-system | grep "SMTP\|email"
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial deployment guide for v0.1.0 |
+| 0.2.0 | 2026-03-31 | docs-manager | Updated: JWT_SECRET_KEY required, CORS_ORIGINS env var, Docker non-root user, audit log monitoring |

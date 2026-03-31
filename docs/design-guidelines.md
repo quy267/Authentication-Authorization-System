@@ -276,15 +276,15 @@ Layer 5: Data Encryption
 
 **Requirements:**
 - Minimum 8 characters
-- Maximum 1024 characters (DoS prevention via Pydantic `max_length`)
+- Maximum 72 bytes (bcrypt truncation boundary — validated as UTF-8 byte length, not char length)
 - Hashed with bcrypt (12 rounds, salt included)
 - Timing-safe comparison
 - Never logged or displayed
 
-**DoS Prevention:**
-- Pydantic `LoginRequest.password = Field(max_length=1024)` validates input before bcrypt
-- Prevents oversized input attacks that could consume CPU during hashing
-- Validation occurs in dependency injection layer before password comparison
+**bcrypt Truncation Guard:**
+- Pydantic `LoginRequest.password = Field(max_length=72)` validates input before bcrypt
+- bcrypt silently truncates at 72 bytes — passwords beyond this are equivalent
+- Validation ensures users know their full password is checked
 
 **Storage:**
 ```json
@@ -299,13 +299,25 @@ Layer 5: Data Encryption
 **PKCE (RFC 7636):**
 - Client creates random `code_verifier`
 - Sends `code_challenge = base64url(SHA256(verifier))`
-- On token exchange, verifies: `SHA256(verifier) == challenge`
+- On token exchange, verifies: `hmac.compare_digest(SHA256(verifier), challenge)` — timing-safe
+
+**Auth Code Reuse Protection (RFC 6749 §4.1.2):**
+- If an auth code is exchanged more than once, ALL tokens issued for that code are revoked
+- Prevents replay attacks
+
+**OAuth2 Revocation (RFC 7009):**
+- `/oauth/revoke` requires `client_id` + `client_secret` (client authentication mandatory)
+- Public clients blocked from `client_credentials` grant
 
 **Client Secrets:**
 - Generated as random strings
 - Hashed with bcrypt before storage
 - Shown only once on creation
 - Cannot be retrieved later
+
+**redirect_uris Validation:**
+- HTTPS required for all redirect URIs
+- Exception: `localhost` and `127.0.0.1` (for development)
 
 ### Token Expiry
 
@@ -369,7 +381,7 @@ Load Balancer (nginx)
 **Rate Limiting:**
 - Shared `Limiter` instance in `app/core/limiter.py`
 - All endpoints use same rate limiter to avoid duplicate initialization
-- IP-based limits: register/login 10/min, refresh/oauth-token 20/min, forgot-password 5/min
+- IP-based limits: register/login 10/min, refresh/oauth-token 20/min, forgot-password 5/min, verify-email/reset-password 10/min
 
 ---
 
@@ -443,11 +455,18 @@ docs/
 
 ---
 
+## Current Security Features (v0.2.0)
+
+- **Audit Logging:** Structured JSON to stdout (login, logout, password_reset, sessions_revoked, roles_changed). Future: persist to MongoDB + query endpoint.
+- **CORS:** Configurable via `CORS_ORIGINS` env var. Empty = no CORS middleware.
+- **Non-root Docker:** Dockerfile runs as `appuser`.
+- **Timing Safety:** Dummy bcrypt on missing users, `hmac.compare_digest` for PKCE.
+
 ## Future Enhancements
 
 **Phase 8+** considerations:
 
-- **Audit Logging:** Log all auth events for compliance
+- **Audit Log Persistence:** Store in MongoDB + query endpoint (admin only)
 - **Webhook Support:** Notify external systems of events
 - **2FA / MFA:** TOTP, SMS, backup codes
 - **Passwordless Auth:** Magic links, WebAuthn
@@ -462,3 +481,4 @@ docs/
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial design guidelines for v0.1.0 |
+| 0.2.0 | 2026-03-31 | docs-manager | Updated: OAuth2 revocation (client auth required), PKCE timing-safe, rate limits list, audit logging current, CORS config, redirect_uris validation |

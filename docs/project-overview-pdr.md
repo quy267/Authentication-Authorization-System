@@ -4,7 +4,7 @@
 
 **Authentication & Authorization System (AAA)** is a production-grade FastAPI service providing secure user authentication, role-based access control, OAuth2 integration, and account security features. Targets SaaS platforms, internal systems, and microservices requiring centralized auth without vendor lock-in.
 
-**Status:** v0.1.0 - Core implementation complete, 90%+ test coverage, ready for integration.
+**Status:** v0.2.0 - 28 security fixes applied, 96% test coverage (103 tests), audit logging active, ready for production.
 
 ---
 
@@ -15,7 +15,8 @@
 1. **Secure by Default:** JWT + OAuth2 + bcrypt + rate limiting + lockout protection
 2. **Developer-Friendly:** Clear API, comprehensive docs, Docker-ready, async-native
 3. **Production-Ready:** Comprehensive test coverage, Docker containerization, health checks
-4. **Extensible:** Service-oriented architecture supports future features (audit logging, webhooks, SAML)
+4. **Extensible:** Service-oriented architecture supports future features (webhooks, SAML, 2FA)
+5. **Observable:** Structured audit logging (JSON to stdout) for security events
 
 ### Target Users
 
@@ -194,19 +195,26 @@
 | Concern | Control |
 |---------|---------|
 | Password Storage | bcrypt with salt (12 rounds) |
-| Password DoS | Pydantic max_length=1024 on password input |
+| Password Truncation | Pydantic max_length=72 (bcrypt truncation boundary, UTF-8 byte validated) |
 | Token Tampering | HMAC-SHA256 signature (HS256) |
-| JWT Key Strength | Validator enforces ≥32 char minimum at startup |
+| JWT Key Strength | Required (no default) + validator enforces ≥32 char minimum at startup |
+| Timing Oracle | Dummy bcrypt on missing users for constant-time login response |
+| PKCE Timing | hmac.compare_digest() instead of == (side-channel fix) |
 | Token Expiration | iat + exp claims, Redis blacklist |
 | Token Double-Spend | Atomic motor find_one_and_update (used flag) |
+| Auth Code Reuse | Reused code revokes all tokens (RFC 6749 §4.1.2) |
+| OAuth2 Refresh Race | Atomic find_one_and_update (TOCTOU fix) |
 | Brute Force | Rate limiting (IP-based) + account lockout (fixed-window) |
 | Role N+1 Queries | Single MongoDB $in query loads all roles at once |
 | Email Enumeration | Same response for valid/invalid emails |
 | CSRF | SameSite cookies + token-based API |
 | SQL Injection | ODM (Beanie) prevents injection |
 | XSS | API returns JSON (no HTML rendering) |
-| CORS | Configurable origins (default: none) |
+| CORS | Configurable via CORS_ORIGINS env var (empty = no middleware) |
 | HTTPS | Ready (reverse proxy responsibility) |
+| Docker | Non-root container (appuser) |
+| Audit Logging | Structured JSON to stdout (login, logout, password_reset, sessions_revoked, roles_changed) |
+| Datetime Safety | Motor tz_aware=True, datetime.now(timezone.utc) throughout |
 | Session Revocation | Account disablement checked on token refresh (is_active) |
 | Expired Token Cleanup | MongoDB TTL indexes auto-delete tokens & codes |
 
@@ -219,7 +227,7 @@
 
 ### Maintainability (NFR5)
 
-- **Code Coverage:** 90%+ unit + integration test coverage
+- **Code Coverage:** 96% (103 tests) unit + integration test coverage
 - **Documentation:** README + 7 doc files + docstrings
 - **Type Safety:** Python type hints throughout
 - **Modularity:** Service layer + dependency injection
@@ -321,17 +329,16 @@
 
 1. **Session Revocation:** `get_current_user()` doesn't check Redis blacklist (incomplete implementation)
 2. **GDPR:** No user deletion endpoint
-3. **Audit Logging:** No request/action audit trail
-4. **Webhooks:** No webhook support for events (user created, password reset, etc.)
-5. **SAML:** OAuth2-only, no SAML 2.0 support
-6. **2FA:** No two-factor authentication
-7. **Passwordless:** No magic links or passwordless flows
-8. **API Docs:** Swagger UI not fully customized
+3. **Webhooks:** No webhook support for events (user created, password reset, etc.)
+4. **SAML:** OAuth2-only, no SAML 2.0 support
+5. **2FA:** No two-factor authentication
+6. **Passwordless:** No magic links or passwordless flows
+7. **API Docs:** Swagger UI not fully customized
 
 ### Phase 8 (Future)
 
 - [ ] Fix session revocation check in `get_current_user()`
-- [ ] Add audit logging (API request log + auth event log)
+- [x] ~~Add audit logging~~ (completed in v0.2.0 — structured JSON to stdout)
 - [ ] Implement user deletion (GDPR compliance)
 - [ ] Add webhook support (user created, password reset, login failed)
 - [ ] Add 2FA (TOTP via pyotp)
@@ -359,3 +366,4 @@
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial PDR for v0.1.0 (core auth, RBAC, OAuth2, email, lockout, Docker, tests) |
+| 0.2.0 | 2026-03-31 | docs-manager | Updated for 28 security fixes: audit logging moved to current, new NFRs (CORS, non-root Docker, timing safety) |

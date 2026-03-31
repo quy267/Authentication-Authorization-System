@@ -282,11 +282,13 @@ class User(Document):
     password_hash: str
     is_verified: bool = False
     roles: List[str] = []
-    failed_login_attempts: int = 0
     created_at: datetime = datetime.now(timezone.utc)
+    updated_at: datetime = datetime.now(timezone.utc)  # auto-set via @before_event(Replace)
 
     class Settings:
         name = "users"
+
+# Note: failed_login_attempts, locked_until removed — lockout is fully in Redis (email-hash keyed)
 ```
 
 **Query patterns:**
@@ -390,20 +392,20 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 ```
 
-**bcrypt DoS Guard:**
+**bcrypt Truncation Guard:**
 ```python
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=1024)  # Limit input size
+    password: str = Field(..., min_length=8, max_length=72)  # bcrypt truncates at 72 bytes
 
-# bcrypt hashing is intentionally slow; large inputs = DoS vector
+# max_length=72 matches the bcrypt truncation boundary (UTF-8 byte length)
 ```
 
-**JWT Key Validator:**
+**JWT Key — Required (No Default):**
 ```python
-# app/core/config.py enforces minimum 32 characters
+# app/core/config.py — JWT_SECRET_KEY has NO default. Pydantic fails on missing env var.
 class Settings(BaseSettings):
-    JWT_SECRET_KEY: str = "change-me-in-production-set-a-secure-key"
+    JWT_SECRET_KEY: str  # REQUIRED — no default, app won't start without it
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod
@@ -412,8 +414,67 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters")
         return v
 
-# Generate secure key in production:
+# Generate secure key:
 # openssl rand -hex 32
+```
+
+**bcrypt 72-Byte Validation:**
+```python
+# bcrypt silently truncates passwords at 72 bytes. Validate UTF-8 byte length, not char length.
+class RegisterRequest(BaseModel):
+    password: str = Field(..., min_length=8, max_length=72)
+
+class LoginRequest(BaseModel):
+    password: str = Field(..., min_length=8, max_length=72)  # matches register
+
+# Validation checks byte length:
+if len(password.encode("utf-8")) > 72:
+    raise HTTPException(400, "Password exceeds 72-byte bcrypt limit")
+```
+
+**Timing Oracle Prevention:**
+```python
+# Always run bcrypt even if user doesn't exist — prevents timing-based email enumeration
+DUMMY_HASH = "$2b$12$LJ3m4ys3Lg.../..."  # pre-computed bcrypt hash
+
+async def login_user(email: str, password: str):
+    user = await User.find_one(User.email == email)
+    if not user:
+        pwd_context.verify(password, DUMMY_HASH)  # constant-time dummy check
+        raise InvalidCredentialsError()
+    # ... proceed with real verification
+```
+
+**Audit Logging Pattern:**
+```python
+import logging, json
+
+audit_logger = logging.getLogger("audit")
+
+# Structured JSON to stdout for security events
+audit_logger.info(json.dumps({
+    "event": "login",
+    "email": email,
+    "ip": request.client.host,
+    "status": "success",
+    "timestamp": datetime.now(timezone.utc).isoformat()
+}))
+
+# Supported events: login, logout, password_reset, sessions_revoked, roles_changed
+```
+
+**CORS Configuration:**
+```python
+# app/main.py — CORS middleware added only when CORS_ORIGINS is set
+if settings.CORS_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS.split(","),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+# Empty CORS_ORIGINS = no CORS middleware added
 ```
 
 **JWT Creation:**
@@ -447,8 +508,11 @@ logger.info(f"User login attempted: {email}")
 if not user:
     raise HTTPException(status_code=404, detail="User not found")
 
-# ✅ GOOD: Same response always
-raise HTTPException(status_code=400, detail="Email not found or already registered")
+# ✅ GOOD: Generic error on registration
+raise HTTPException(status_code=400, detail="Registration could not be completed")
+
+# ✅ GOOD: Same response always on login (with dummy bcrypt)
+raise HTTPException(status_code=401, detail="Invalid email or password")
 ```
 
 ---
@@ -519,3 +583,4 @@ async def admin_user(db):
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial code standards for v0.1.0 |
+| 0.2.0 | 2026-03-31 | docs-manager | Added: JWT required (no default), bcrypt 72-byte validation, timing oracle prevention, audit logging, CORS config patterns |

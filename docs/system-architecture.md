@@ -15,10 +15,13 @@ High-level design, component interactions, and data flows.
                      │
 ┌────────────────────▼────────────────────────────────────────┐
 │                   FastAPI Web Server                         │
-│                 (Uvicorn, 0.0.0.0:8000)                      │
+│         (Uvicorn, 0.0.0.0:8000, non-root appuser)           │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │       HTTP Routes (auth, roles, oauth2, users)       │   │
-│  └────────────┬────────────────────────────────────────┘   │
+│  │  CORS Middleware (configurable via CORS_ORIGINS)      │   │
+│  └────────────┬──────────────────────────────────────────┘  │
+│  ┌────────────▼──────────────────────────────────────────┐  │
+│  │       HTTP Routes (auth, roles, oauth2, users)        │  │
+│  └────────────┬──────────────────────────────────────────┘  │
 │               │                                             │
 │  ┌────────────▼──────────────────────────────────────────┐  │
 │  │    Dependency Injection (get_current_user, roles)     │  │
@@ -31,6 +34,10 @@ High-level design, component interactions, and data flows.
 │  └────────────┬──────────────────────────────────────────┘  │
 │               │                                             │
 │  ┌────────────▼──────────────────────────────────────────┐  │
+│  │   Audit Logging (structured JSON to stdout)           │  │
+│  └────────────┬──────────────────────────────────────────┘  │
+│               │                                             │
+│  ┌────────────▼──────────────────────────────────────────┐  │
 │  │    Data Layer (Models, Security, Database)            │  │
 │  └────────────┬──────────────────────────────────────────┘  │
 └────────────────┼────────────────────────────────────────────┘
@@ -40,12 +47,12 @@ High-level design, component interactions, and data flows.
     ┌───▼────────┐   ┌──────▼─────┐  ┌────────▼──────┐
     │   MongoDB  │   │   Redis    │  │  SMTP Server  │
     │   (Data)   │   │  (Cache)   │  │   (Email)     │
-    │            │   │            │  │               │
+    │ tz_aware   │   │            │  │               │
     │ Collections│   │ Keys:      │  │ Async SMTP    │
     │ - users    │   │ - bl:{jti} │  │               │
     │ - roles    │   │ - rl:email │  │               │
     │ - oauth2   │   │ - lockout  │  │               │
-    │ - tokens   │   │            │  │               │
+    │ - tokens   │   │ - revoked  │  │               │
     └────────────┘   └────────────┘  └───────────────┘
 ```
 
@@ -71,10 +78,13 @@ User Registration → Email Verification → Login → Token Refresh/Logout
 
 3. Login
    POST /auth/login (email, password)
+   → Check lockout FIRST (email-hash keyed, works for non-existent users)
    → Fetch user from MongoDB
-   → Verify password (bcrypt)
-   → Check if locked (Redis)
+   → If missing: run dummy bcrypt hash (timing oracle prevention)
+   → Check is_active before password verification
+   → Verify password (bcrypt, 72-byte validated)
    → Create JWT tokens (access: 30min, refresh: 7days)
+   → Audit log: structured JSON to stdout
    → Return tokens
 
 4. Refresh
@@ -118,11 +128,17 @@ Third-party Client
    ├─ 7. AAA validates:
    │      - Code not expired
    │      - Client credentials match
-   │      - PKCE: SHA256(verifier) == challenge
+   │      - PKCE: hmac.compare_digest(SHA256(verifier), challenge)  ← timing-safe
+   │      - Code reuse check: if already used → revoke ALL tokens for that code (RFC 6749 §4.1.2)
    │
-   ├─ 8. Return access token + refresh token
+   ├─ 8. Return access token + refresh token (expires_in computed from TTL constant)
    │
    └─ 9. Client app now has tokens for API calls
+   
+   Notes:
+   - OAuth2 refresh uses atomic find_one_and_update (TOCTOU race fix)
+   - /oauth/revoke requires client_id + client_secret
+   - Public clients blocked from client_credentials grant
 ```
 
 ---
@@ -158,8 +174,9 @@ All rate-limited endpoints use shared `Limiter` instance from `app/core/limiter.
 | POST /auth/register | 10 req/min | Per IP |
 | POST /auth/login | 10 req/min | Per IP |
 | POST /auth/refresh | 20 req/min | Per IP |
+| POST /auth/verify-email | 10 req/min | Per IP |
 | POST /auth/forgot-password | 5 req/min | Per IP |
-| POST /auth/reset-password | 5 req/min | Per IP |
+| POST /auth/reset-password | 10 req/min | Per IP |
 | POST /oauth/token | 20 req/min | Per IP |
 | GET /oauth/authorize | 10 req/min | Per IP |
 
@@ -168,7 +185,8 @@ All rate-limited endpoints use shared `Limiter` instance from `app/core/limiter.
 ```
 Failed login attempt:
    │
-   ├─ Increment Redis: lockout:{user_id}
+   ├─ Lockout checked BEFORE user lookup (email-hash keyed)
+   ├─ Increment Redis: lockout:{email_hash}  (works for non-existent users)
    │
 After 1st failure:
    ├─ Count = 1
@@ -213,9 +231,10 @@ POST /auth/forgot-password or /auth/reset-password:
   "password_hash": "bcrypt...",
   "is_verified": true,
   "roles": ["user", "admin"],
-  "failed_login_attempts": 0,
-  "created_at": ISODate
+  "created_at": ISODate,
+  "updated_at": ISODate           # auto-set via @before_event(Replace) hook
 }
+# Removed: failed_login_attempts, locked_until (lockout now in Redis, email-hash keyed)
 ```
 
 ### Roles Collection
@@ -275,9 +294,9 @@ POST /auth/forgot-password or /auth/reset-password:
 ### Redis Keys
 ```
 bl:{jti}               → expiry_timestamp  (JWT blacklist)
-rl:email:{email}       → counter            (email rate limit)
-lockout:{user_id}      → counter            (failed login attempts)
-revoked_at:{user_id}   → timestamp          (session revocation)
+rl:email:{email}       → counter            (email rate limit, atomic INCR-first)
+lockout:{email_hash}   → counter            (failed login attempts, email-hash keyed)
+revoked_at:{user_id}   → timestamp          (session revocation, TTL = REFRESH_TOKEN_EXPIRE_DAYS * 86400)
 ```
 
 ---
@@ -287,40 +306,57 @@ revoked_at:{user_id}   → timestamp          (session revocation)
 ```
 Layer 1: Input Validation (Pydantic)
 ├─ Email format validation
-├─ Password requirements (8+ chars)
-├─ Password max_length=1024 (bcrypt DoS prevention)
+├─ Password requirements (8+ chars, max 72 bytes — bcrypt truncation boundary)
+├─ Role name: min_length=1, max_length=64, pattern=^[a-z][a-z0-9_-]*$
+├─ redirect_uris: HTTPS required except localhost
+├─ Pagination cap: list_users limit≤100 via Query(le=100)
 └─ Field type/length enforcement
 
-Layer 2: Authentication
-├─ Password hashing (bcrypt, 12 rounds)
-├─ JWT signing (HS256)
-├─ JWT key validator (≥32 char minimum at startup)
-├─ Account lockout (fixed-window, 15 min after 5 failures)
+Layer 2: CORS (Configurable)
+├─ CORS_ORIGINS env var (comma-separated)
+└─ Empty = no CORS middleware
+
+Layer 3: Authentication
+├─ Password hashing (bcrypt, 12 rounds, 72-byte validated)
+├─ Timing oracle prevention (dummy bcrypt on missing users)
+├─ JWT signing (HS256), JWT_SECRET_KEY required (no default)
+├─ Lockout checked before user lookup (email-hash keyed, works for non-existent users)
+├─ is_active checked before password verification
 └─ Token revocation (Redis blacklist with JTI)
 
-Layer 3: Authorization
+Layer 4: Authorization
 ├─ Role-based checking (N+1 fix: single MongoDB $in query)
 ├─ Permission checking
 └─ Account status check on token refresh (is_active)
 
-Layer 4: Rate Limiting
-├─ IP-based (slowapi) per endpoint
-├─ Email-based (Redis) 3/hour
+Layer 5: Rate Limiting
+├─ IP-based (slowapi) per endpoint (including verify-email 10/min, reset-password 10/min)
+├─ Email-based (Redis) 3/hour, atomic INCR-first pattern (TOCTOU fix)
 ├─ Lockout counter (Redis fixed-window)
 └─ All sensitive endpoints rate-limited (shared limiter instance)
 
-Layer 5: OAuth2 Security
+Layer 6: OAuth2 Security
 ├─ Atomic code exchange (motor find_one_and_update)
-├─ Prevents double-spend (used flag check)
-├─ PKCE validation (S256: SHA256(verifier) == challenge)
+├─ Auth code reuse revokes ALL tokens (RFC 6749 §4.1.2)
+├─ PKCE validation (S256: hmac.compare_digest — timing-safe)
+├─ Atomic refresh (find_one_and_update — TOCTOU race fix)
+├─ Revocation requires client_id + client_secret
+├─ Public clients blocked from client_credentials
 └─ Client secret hashing (bcrypt)
 
-Layer 6: Data Security
+Layer 7: Audit Logging
+├─ Structured JSON to stdout
+├─ Events: login, logout, password_reset, sessions_revoked, roles_changed
+└─ Includes: email, IP, status, timestamp
+
+Layer 8: Data Security
 ├─ HTTPS in transit
 ├─ Password hashing at rest (bcrypt)
 ├─ Client secret hashing (bcrypt)
 ├─ MongoDB TTL indexes (auto-delete expired tokens/codes)
-└─ JWT token caching (Redis)
+├─ Timezone-aware datetimes (Motor tz_aware=True, datetime.now(timezone.utc))
+├─ revoked_at Redis keys with TTL (REFRESH_TOKEN_EXPIRE_DAYS * 86400)
+└─ Non-root Docker container (appuser)
 ```
 
 ---
@@ -387,3 +423,4 @@ Layer 6: Data Security
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial system architecture for v0.1.0 |
+| 0.2.0 | 2026-03-31 | docs-manager | Updated for 28 security fixes: CORS layer, audit logging layer, timing oracle prevention, auth code reuse revocation, updated Redis keys/schema |

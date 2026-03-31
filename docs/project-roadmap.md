@@ -2,7 +2,7 @@
 
 Development phases, milestones, and future work.
 
-**Last Updated:** 2026-03-29 | **Current Version:** 0.1.0 | **Overall Progress:** 100% (Phase 1-7 Complete)
+**Last Updated:** 2026-03-31 | **Current Version:** 0.2.0 | **Overall Progress:** 100% (Phase 1-7 Complete, 28 Security Fixes)
 
 ---
 
@@ -77,13 +77,58 @@ Development phases, milestones, and future work.
 
 ---
 
-## Post-v0.1.0 Security & Quality Improvements
+## v0.2.0 Security Release (28 Fixes, 2026-03-31)
 
-### Security Enhancements Completed
+### Critical Fixes (7)
+- **C1:** Fixed datetime.utcnow() crash — added `tz_aware=True` to Motor client, replaced all `datetime.utcnow()` with `datetime.now(timezone.utc)`
+- **C2:** Login timing oracle prevention — dummy bcrypt hash on missing users for constant-time response
+- **C3:** PKCE uses `hmac.compare_digest()` instead of `==` (timing side-channel fix)
+- **C4:** OAuth2 refresh uses atomic `find_one_and_update` (TOCTOU race fix)
+- **C5:** JWT_SECRET_KEY now required (no default) — pydantic fails on missing env var
+- **C6:** Auth code reuse revokes all tokens per RFC 6749 §4.1.2
+- **C7:** Dockerfile runs as non-root user (appuser)
+
+### Important Fixes (12)
+- **I1:** Lockout checked before user lookup (email-hash keyed, works for non-existent users)
+- **I2:** is_active checked before password verification
+- **I3:** Registration returns generic error "Registration could not be completed" (enumeration prevention)
+- **I4:** bcrypt 72-byte validation on password (UTF-8 byte length, not char length)
+- **I5:** `revoked_at:` Redis keys now have TTL (REFRESH_TOKEN_EXPIRE_DAYS * 86400). DRY: consolidated between auth_service and user_service
+- **I6:** Email rate limit uses atomic INCR-first pattern (TOCTOU fix)
+- **I7:** OAuth2 revocation endpoint now requires client_id + client_secret
+- **I8:** Rate limiting added to /auth/verify-email (10/min) and /auth/reset-password (10/min)
+- **I9:** list_users pagination cap: limit max 100 via Query(le=100)
+- **I10:** User.updated_at auto-updates via Beanie @before_event(Replace) hook
+- **I11:** Logout handles decode_token failure per token independently
+- **I12:** Public clients blocked from client_credentials grant
+
+### Minor Fixes (9)
+- **M1:** redirect_uris validated (HTTPS required except localhost)
+- **M2:** Role name: min_length=1, max_length=64, pattern=^[a-z][a-z0-9_-]*$
+- **M4:** LoginRequest.password max_length=72 (matches register, bcrypt truncation)
+- **M5:** Removed dead User model fields: failed_login_attempts, locked_until
+- **M6:** OAuth2TokenResponse.expires_in computed from TTL constant, not hardcoded 3600
+- **M7:** CORS middleware added (configurable via CORS_ORIGINS env var)
+- **O2:** seed_default_roles now idempotent on permissions (updates if changed in code)
+- **O7:** requirements.txt cleaned (duplicate httpx removed)
+- **Audit logging:** Structured JSON to stdout for login, logout, password_reset, sessions_revoked, roles_changed
+
+### Test Coverage Improvement
+- **90% → 96%** (64 → 103 tests)
+- New test files: test_security.py, test_models.py, test_config.py, test_database.py, test_health.py
+
+### New Environment Variables
+- `CORS_ORIGINS` — comma-separated origins (empty = no CORS middleware)
+- `JWT_SECRET_KEY` — now REQUIRED (was optional with insecure default)
+
+---
+
+## Post-v0.1.0 Security & Quality Improvements (Pre-v0.2.0)
+
+### Security Enhancements
 - **Atomic Token Exchange:** OAuth2 code exchange uses motor `find_one_and_update` with `used` flag to prevent race-condition double-spend
 - **N+1 Fix:** `require_permission` loads all user roles in single MongoDB `$in` query instead of serial lookups
 - **JWT Key Validator:** Enforces ≥32 character minimum at Settings initialization; raises ValueError if too short
-- **Password DoS Guard:** Pydantic `max_length=1024` on LoginRequest.password prevents oversized input attacks
 - **Fixed-Window Lockout:** Account lockout TTL set only on first failure; subsequent attempts increment counter but don't reset window
 - **Account Status Check:** `/auth/refresh` verifies `is_active` (403 if disabled)
 - **Expanded Rate Limits:** IP-based limits on refresh (20/min), OAuth token (20/min), forgot-password (5/min)
@@ -118,13 +163,12 @@ async def get_current_user() -> User:
 **Impact:** Critical for logout functionality
 **Effort:** 2-4 hours
 
-### 8.2 Audit Logging
+### 8.2 Audit Logging ✅ (Completed in v0.2.0)
 
-- Log all auth events (login, logout, password reset, failed attempts)
-- Log admin actions (role changes, user modifications)
-- Store in MongoDB collection
-- Query endpoint with filters (admin only)
-- **Effort:** 1-2 weeks
+- ~~Log all auth events~~ → Implemented: structured JSON to stdout
+- ~~Log admin actions~~ → Implemented: roles_changed, sessions_revoked events
+- Future: Store in MongoDB collection + query endpoint with filters (admin only)
+- **Remaining Effort:** 1 week (for persistence + query endpoint)
 
 ### 8.3 GDPR Compliance
 
@@ -192,8 +236,10 @@ async def get_current_user() -> User:
 | Docker Ready | 6 | 2026-03-29 | ✅ Complete |
 | 90%+ Test Coverage | 7 | 2026-03-29 | ✅ Complete |
 | v0.1.0 Released | - | 2026-03-29 | ✅ Complete |
+| v0.2.0 Security Release | - | 2026-03-31 | ✅ Complete (28 fixes) |
+| Audit Logging (stdout) | 8.2 | 2026-03-31 | ✅ Complete |
 | Session Revocation Fix | 8.1 | TBD | 🔜 Planned |
-| Audit Logging | 8.2 | TBD | 🔜 Planned |
+| Audit Log Persistence | 8.2+ | TBD | 🔜 Planned |
 
 ---
 
@@ -202,7 +248,7 @@ async def get_current_user() -> User:
 | Metric | Target | Achieved | Status |
 |--------|--------|----------|--------|
 | All 19 endpoints working | 100% | 100% | ✅ |
-| Test coverage | 90%+ | 90%+ | ✅ |
+| Test coverage | 90%+ | 96% (103 tests) | ✅ |
 | Login latency (p95) | <500ms | <500ms | ✅ |
 | No hardcoded secrets | 100% | 100% | ✅ |
 | Docker deployment | Working | Working | ✅ |
@@ -226,11 +272,6 @@ async def get_current_user() -> User:
    - Auto-generated docs not fully customized
    - Priority: MEDIUM
    - Phase: 8.9
-
-3. **Error Messages**
-   - Some error responses could be more generic
-   - Priority: MEDIUM
-   - Phase: 8.1
 
 ### Low (Nice to Have)
 
@@ -274,6 +315,31 @@ Phase 8.x (Future)
 
 ## Release Notes
 
+### v0.2.0 (2026-03-31)
+
+**Security Release — 28 Fixes (7 Critical, 12 Important, 9 Minor):**
+- ✅ Timing oracle prevention (dummy bcrypt on missing users)
+- ✅ PKCE timing-safe comparison (hmac.compare_digest)
+- ✅ JWT_SECRET_KEY now required (no default)
+- ✅ Auth code reuse revokes all tokens (RFC 6749 §4.1.2)
+- ✅ OAuth2 refresh atomic (TOCTOU fix)
+- ✅ Dockerfile non-root (appuser)
+- ✅ datetime.utcnow() → datetime.now(timezone.utc)
+- ✅ Lockout email-hash keyed (works for non-existent users)
+- ✅ Audit logging (structured JSON to stdout)
+- ✅ CORS middleware (CORS_ORIGINS env var)
+- ✅ bcrypt 72-byte validation
+- ✅ 96% test coverage (103 tests, up from 64)
+
+**New Env Vars:** `CORS_ORIGINS`, `JWT_SECRET_KEY` (now required)
+
+**Breaking Changes:**
+- `JWT_SECRET_KEY` no longer has a default — must be set in .env
+- `LoginRequest.password` max_length reduced from 1024 to 72
+- `/oauth/revoke` now requires client_id + client_secret
+
+---
+
 ### v0.1.0 (2026-03-29)
 
 **Features:**
@@ -300,3 +366,4 @@ Phase 8.x (Future)
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 0.1.0 | 2026-03-29 | docs-manager | Initial roadmap for v0.1.0 (phases 1-7 complete) |
+| 0.2.0 | 2026-03-31 | docs-manager | Added v0.2.0 release section (28 security fixes), moved audit logging to completed, updated test coverage to 96% |
